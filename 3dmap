@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>3Dワールド 完全版</title>
+<style>
+  body { margin:0; overflow:hidden; background:#87ceeb; font-family:sans-serif; }
+  #hud { position:fixed; top:10px; left:10px; color:#fff; z-index:5; font-size:14px; background:rgba(0,0,0,0.4); padding:5px 10px; border-radius:5px; }
+  #compass { position:fixed; top:10px; left:50%; transform:translateX(-50%); color:#fff; z-index:5; font-family:monospace; background:rgba(0,0,0,0.4); padding:2px 5px; border-radius:3px; }
+  #crosshair { position:fixed; top:50%; left:50%; width:20px; height:20px; pointer-events:none; z-index:5; }
+  #crosshair::before, #crosshair::after { content:''; position:absolute; background:#ffffff; }
+  #crosshair::before { left:50%; top:0; transform:translateX(-50%); width:2px; height:100%; }
+  #crosshair::after { top:50%; left:0; transform:translateY(-50%); height:2px; width:100%; }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<div id="compass"></div>
+<div id="crosshair"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.159.0/build/three.min.js"></script>
+<script>
+// === 基本セットアップ ===
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// === 光 ===
+const light = new THREE.DirectionalLight(0xffffff,1);
+light.position.set(1,1,1);
+scene.add(light);
+scene.add(new THREE.AmbientLight(0xffffff,0.3));
+
+// === HUD ===
+const hud = document.getElementById("hud");
+const compassDiv = document.getElementById("compass");
+
+// === プレイヤー ===
+let player = {x:0,y:5,z:0,vy:0,grounded:false};
+let yaw=0, pitch=0;
+const keys = {};
+document.addEventListener('keydown', e=> keys[e.key.toLowerCase()]=true);
+document.addEventListener('keyup', e=> { keys[e.key.toLowerCase()]=false; if(e.key.toLowerCase()==='w') dashing=false; });
+
+// === マウス ===
+let sensitivity = 0.1;
+document.addEventListener('mousemove', e=>{
+  if(!document.pointerLockElement) return;
+  yaw -= e.movementX*sensitivity;
+  pitch -= e.movementY*sensitivity;
+  pitch = Math.max(-80, Math.min(80,pitch));
+});
+document.addEventListener('click', ()=> document.body.requestPointerLock());
+
+// === 物理 ===
+const gravity = -0.015;
+const jumpPower = 0.35;
+function getTerrainHeight(x,z){ return Math.sin(x*0.2)*Math.cos(z*0.2)*3 + Math.sin(x*0.05+z*0.1)*2; }
+
+// === ダッシュ ===
+let lastWTime=0, wPressCount=0, dashing=false;
+const doubleTapTime = 300;
+document.addEventListener('keydown', e=>{
+  if(e.key.toLowerCase()==='w'){
+    const now = performance.now();
+    if(now - lastWTime < doubleTapTime) wPressCount++;
+    else wPressCount=1;
+    lastWTime=now;
+    if(wPressCount===2) dashing=true;
+  }
+});
+
+// === 雪用エフェクト ===
+const animateList = [];
+function createSnowParticles(){
+  const geo = new THREE.BufferGeometry();
+  const vertices=[];
+  for(let i=0;i<500;i++)
+    vertices.push(Math.random()*400-200,Math.random()*200+50,Math.random()*400-200);
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(vertices,3));
+  const mat = new THREE.PointsMaterial({color:0xffffff, size:0.5});
+  const snow = new THREE.Points(geo, mat);
+  scene.add(snow);
+  animateList.push(()=>{
+    snow.position.y -= 0.05;
+    if(snow.position.y < -10) snow.position.y=100;
+  });
+}
+
+// === 木生成 ===
+function createTrees(count,sizeMultiplier,type){
+  const trunkMat = new THREE.MeshStandardMaterial({color:0x8b4513});
+  const leafMat = new THREE.MeshStandardMaterial({color:type==="snow"?0xeeeeff:0x228b22});
+  const trunkGeo = new THREE.CylinderGeometry(0.2*sizeMultiplier,0.2*sizeMultiplier,2*sizeMultiplier);
+  const leafGeo = new THREE.ConeGeometry(1.2*sizeMultiplier,3*sizeMultiplier);
+  for(let i=0;i<count;i++){
+    const x=(Math.random()-0.5)*200;
+    const z=(Math.random()-0.5)*200;
+    const y=getTerrainHeight(x,z);
+    const trunk = new THREE.Mesh(trunkGeo,trunkMat);
+    trunk.position.set(x,y+1,z);
+    const leaf = new THREE.Mesh(leafGeo,leafMat);
+    leaf.position.set(x,y+3,z);
+    scene.add(trunk); scene.add(leaf);
+  }
+}
+
+// === ワールド生成 ===
+function setSky(type){
+  const loader = new THREE.TextureLoader();
+  loader.crossOrigin="anonymous";
+  let url;
+  if(type==="plain"||type==="forest") url="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQoAtwUlZVU04kIUn_3tb988Gp-ISN7SXwxHg&s";
+  else if(type==="snow") url="https://thumb.photo-ac.com/c5/c5b5f5ae75e222732ca1a156af4cc713_t.jpeg";
+  else { scene.background=new THREE.Color(0x87ceeb); return; }
+  loader.load(url, texture=> scene.background=texture, undefined, ()=>scene.background=new THREE.Color(0x87ceeb));
+}
+
+function generateWorld(type){
+  setSky(type);
+  const size=200, divs=80;
+  const geometry = new THREE.PlaneGeometry(size,size,divs,divs);
+  geometry.rotateX(-Math.PI/2);
+  const pos = geometry.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    pos.setY(i, getTerrainHeight(x,z));
+  }
+  geometry.computeVertexNormals();
+  let color=0x228b22;
+  if(type==="snow") color=0xffffff;
+  const material = new THREE.MeshStandardMaterial({color});
+  const terrain = new THREE.Mesh(geometry,material);
+  scene.add(terrain);
+
+  if(type==="forest") createTrees(60,2,type);
+  else if(type==="plain") createTrees(20,1,type);
+  else if(type==="snow") { createTrees(20,1.5,type); createSnowParticles(); }
+}
+
+// ワールド初期化（例: 平地）
+generateWorld("plain");
+
+// === メインループ ===
+function animate(){
+  requestAnimationFrame(animate);
+
+  // 移動
+  const yawRad = THREE.MathUtils.degToRad(yaw);
+  const forward = new THREE.Vector3(Math.sin(yawRad),0,-Math.cos(yawRad));
+  const right = new THREE.Vector3(-forward.z,0,forward.x);
+  const baseSpeed = 0.3;
+  const currentSpeed = (dashing && keys['w']) ? baseSpeed*2 : baseSpeed;
+  if(keys['w']) { player.x += forward.x*currentSpeed; player.z += forward.z*currentSpeed; }
+  if(keys['s']) { player.x -= forward.x*baseSpeed; player.z -= forward.z*baseSpeed; }
+  if(keys['a']) { player.x -= right.x*baseSpeed; player.z -= right.z*baseSpeed; }
+  if(keys['d']) { player.x += right.x*baseSpeed; player.z += right.z*baseSpeed; }
+
+  // 重力
+  player.vy += gravity;
+  player.y += player.vy;
+  const groundY = getTerrainHeight(player.x,player.z);
+  if(player.y <= groundY+1.6){ player.y=groundY+1.6; player.vy=0; player.grounded=true; } 
+  else player.grounded=false;
+
+  // ジャンプ
+  if(keys[' '] && player.grounded){ player.vy=jumpPower; player.grounded=false; }
+
+  // カメラ
+  camera.position.set(player.x,player.y,player.z);
+  camera.rotation.order='YXZ';
+  camera.rotation.y = THREE.MathUtils.degToRad(yaw);
+  camera.rotation.x = THREE.MathUtils.degToRad(pitch);
+
+  // HUD
+  hud.innerHTML=`X:${player.x.toFixed(1)} Y:${player.y.toFixed(1)} Z:${player.z.toFixed(1)}<br>Yaw:${yaw.toFixed(1)} Pitch:${pitch.toFixed(1)}`;
+
+  // コンパス
+  const dirs=["N","NE","E","SE","S","SW","W","NW"];
+  let dirIndex = Math.round((yaw%360)/45);
+  if(dirIndex<0) dirIndex+=8;
+  compassDiv.innerHTML=dirs[dirIndex];
+
+  // 雪エフェクト
+  animateList.forEach(f=>f());
+
+  renderer.render(scene,camera);
+}
+animate();
+
+window.addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>
